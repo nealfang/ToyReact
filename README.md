@@ -1,2 +1,1 @@
-# ToyReact
-a simple react
+# personal study
