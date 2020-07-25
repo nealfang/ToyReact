@@ -1,43 +1,80 @@
+let childrenSymbol = Symbol('children')
+
 class ElemnetWrapper {
   constructor(type) {
-    this.root = document.createElement(type)
+    this.type = type
+    this.props = Object.create(null)
+    this[childrenSymbol] = []
+    this.children = []
   }
   setAttribute(name, value) {
-    if (name.match(/^on([\s\S]+)$/)) {
-      // 只需要把第一个字母变小写，因为有些时间是需要由大写的
-      let eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
-      this.root.addEventListener(eventName, value)
-    }
-    if (name === 'className') {
-      name = 'class'
-    }
-    this.root.setAttribute(name, value)
+    this.props[name] = value
   }
   appendChild(vchild) {
-    // 后续虚拟dom的改造在这里
-    let range = document.createRange()
-    if (this.root.children.length) {
-      range.setStartAfter(this.root.lastChild)
-      range.setEndAfter(this.root.lastChild)
-    }else{
-      range.setStart(this.root, 0)
-      range.setEnd(this.root, 0)
-    }
-    vchild.mountTo(range)
+    this[childrenSymbol].push(vchild)
+    this.children.push(vchild.vdom)
+  }
+  get vdom() {
+    return this
   }
   mountTo(range) {
+    this.range = range
+
+    // == TODO: 待优化的临时占位符 ===========================
+
+    let placeholder = document.createComment('placeholder')
+    let endRange = document.createRange()
+    endRange.setStart(range.endContainer, range.endOffset)
+    endRange.setEnd(range.endContainer, range.endOffset)
+    endRange.insertNode(placeholder)
+
+    // ====================================================
+
     range.deleteContents()
-    range.insertNode(this.root)
+    let element = document.createElement(this.type)
+
+    for (let name in this.props) {
+      const value = this.props[name]
+      if (name.match(/^on([\s\S]+)$/)) {
+        // 只需要把第一个字母变小写，因为有些时间是需要由大写的
+        let eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
+        element.addEventListener(eventName, value)
+      }
+      if (name === 'className') {
+        element.setAttribute('class', value)
+      }
+      element.setAttribute(name, value)
+    }
+
+    for (let child of this.children) {
+      let range = document.createRange()
+      if (element.children.length) {
+        range.setStartAfter(element.lastChild)
+        range.setEndAfter(element.lastChild)
+      } else {
+        range.setStart(element, 0)
+        range.setEnd(element, 0)
+      }
+      child.mountTo(range)
+    }
+
+    range.insertNode(element)
   }
 }
 
 class TextWrapper {
   constructor(content) {
     this.root = document.createTextNode(content)
+    this.type = "#text"
+    this.children = []
+    this.props = Object.create(null)
   }
   mountTo(range) {
     range.deleteContents()
     range.insertNode(this.root)
+  }
+  get vdom() {
+    return this
   }
 }
 
@@ -46,11 +83,10 @@ export class Component {
     this.children = []
     this.props = Object.create(null)
   }
+  get type() {
+    return this.constructor.name;
+  }
   setAttribute(name, value) {
-    // if (name.match(/^on([\s\S]+)$/)) {
-    //   console.log(RegExp.$1);
-    // } 怎么不是在这里
-    // 这里处理的的组件在别的组件内部挂载的时候调用
     this.props[name] = value
     this[name] = value
   }
@@ -58,28 +94,94 @@ export class Component {
     this.range = range
     this.update()
   }
-  update(){
-    let placeholder = document.createComment('placeholder')
-    let range = document.createRange()
-    range.setStart(this.range.endContainer, this.range.endOffset)
-    range.setEnd(this.range.endContainer, this.range.endOffset)
-    range.insertNode(placeholder)
+  update() {
+    let vdom = this.vdom
+    if (this.oldVdom) {
+      let isSameNode = (node1, node2) => {
+        if (node1.type !== node2.type) {
+          return false
+        }
+        for (let name in node1.props) {
+          // TODO: 事件对比在这里没生效，需要优化
+          // if (
+          //   typeof node1.props[name] === 'function'
+          //   && typeof node2.props[name] === 'function'
+          //   && node1.props[name].toString === node2.props[name].toString
+          // ) {
+          //   continue
+          // }
+          if (
+            typeof node1.props[name] === 'object'
+            && typeof node2.props[name] === 'object'
+            && JSON.stringify(node1.props[name]) === JSON.stringify(node2.props[name])
+          ) {
+            continue
+          }
+          if (node1.props[name] !== node2.props[name]) {
+            return false
+          }
+        }
+        if (Object.keys(node1.props).length !== Object.keys(node2.props).length) {
+          return false
+        }
+        return true
+      }
 
-    this.range.deleteContents()
-    let vdome = this.render()
-    vdome.mountTo(this.range
+      let isSameTree = (node1, node2) => {
+        if (
+          !isSameNode(node1, node2)
+          || node1.children.length !== node2.children.length
+        ) {
+          return false
+        }
+        for (let i = 0; i < node1.children.length; i++) {
+          if (!isSameTree(node1.children[i], node2.children[i])) {
+            return false
+          }
+        }
+        return true
+      }
+
+      let replace = (newTree, oldTree) => {
+        if (isSameTree(newTree, oldTree)) {
+          return;
+        }
+
+        if (!isSameNode(newTree, oldTree)) {
+          newTree.mountTo(oldTree.range)
+        } else {
+          // TODO: 展开children继续做处理，删除、新增、移位
+          for (let i = 0; i < newTree.children.length; i++) {
+            replace(newTree.children[i], oldTree.children[i])
+          }
+        }
+      }
+      replace(vdom, this.oldVdom)
+    } else {
+      vdom.mountTo(this.range)
+    }
+    this.oldVdom = vdom
+  }
+
+  get vdom() {
+    return this.render().vdom
   }
   appendChild(vchild) {
     this.children.push(vchild)
   }
   setState(state) {
+    // cm 这个合并对象的方法需要再梳理
     let merge = (oldState, newState) => {
       for (let p in newState) {
-        if (typeof newState[p] === 'object') {
-          if (typeof newState[p] !== 'object') {
-            oldState[p] = {}
+        if (typeof newState[p] === 'object' && newState[p] !== null) {
+          if (typeof oldState[p] !== 'object') {
+            if (newState[p] instanceof Array) {
+              oldState[p] = []
+            } else {
+              oldState[p] = {}
+            }
           }
-          merge(oldState[p], newsState[p])
+          merge(oldState[p], newState[p])
         } else {
           oldState[p] = newState[p]
         }
@@ -89,6 +191,7 @@ export class Component {
     if (!this.state && state) {
       this.state = {}
     }
+
     merge(this.state, state)
     this.update()
   }
@@ -113,7 +216,14 @@ export let ToyReact = {
         if (typeof child === 'object' && child instanceof Array) {
           insertChildren(child)
         } else {
-          if (!(child instanceof Component) && !(child instanceof ElemnetWrapper) && !(child instanceof TextWrapper)) {
+          if (child === null || child === void 0) {
+            child = ''
+          }
+          if (
+            !(child instanceof Component) &&
+            !(child instanceof ElemnetWrapper) &&
+            !(child instanceof TextWrapper)
+          ) {
             child = String(child)
           }
           if (typeof child === 'string') {
@@ -133,7 +243,7 @@ export let ToyReact = {
     if (element.children.length) {
       range.setStartAfter(element.lastChild)
       range.setEndAfter(element.lastChild)
-    }else{
+    } else {
       range.setStart(element, 0)
       range.setEnd(element, 0)
     }
